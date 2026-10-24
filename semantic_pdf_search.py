@@ -1,4 +1,6 @@
 
+import re
+
 import streamlit as st
 import pymupdf
 from sentence_transformers import SentenceTransformer
@@ -30,65 +32,105 @@ def load_model():
 model = load_model()
 
 
-# 3. Split page text into overlapping chunks
+# 3. Split page text into section-aware chunks
+def create_chunks(text, chunk_size=700):
+    lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
 
-def create_chunks(text, chunk_size=1000, overlap=150):
-    # Step 1: Clean up unnecessary whitespace
-    text = " ".join(text.split())
+    # Identify headings and group lines into sections.
+    sections = []
+    current_section = []
 
-    # Step 2: Split the text into sentences
-    sentences = text.replace("! ", ". ").replace("? ", ". ").split(". ")
+    for line in lines:
+        is_heading = (
+            len(line) <= 70
+            and any(char.isalpha() for char in line)
+            and line == line.upper()
+        )
+
+        if is_heading and current_section:
+            sections.append(current_section)
+            current_section = []
+
+        current_section.append(line)
+
+    if current_section:
+        sections.append(current_section)
 
     chunks = []
-    current_chunk = ""
 
-    # Step 3: Add complete sentences to each chunk
-    for sentence in sentences:
-        sentence = sentence.strip()
+    # Build chunks without crossing detected section boundaries.
+    for section in sections:
+        current_chunk = ""
 
-        if not sentence:
-            continue
+        for line in section:
+            if len(line) > chunk_size:
+                units = re.split(r"(?<=[.!?])\s+", line)
+            else:
+                units = [line]
 
-        # Start a new chunk if adding this sentence exceeds the limit
-        if (
-            current_chunk
-            and len(current_chunk) + len(sentence) + 1 > chunk_size
-        ):
-            chunks.append(current_chunk.strip())
-            current_chunk = ""
+            for unit in units:
+                unit = unit.strip()
 
-        # Add the sentence to the current chunk
+                if not unit:
+                    continue
+
+                # Split any remaining oversized text into word groups.
+                if len(unit) > chunk_size:
+                    words = unit.split()
+                    parts = []
+                    part = ""
+
+                    for word in words:
+                        candidate = f"{part} {word}".strip()
+
+                        if len(candidate) > chunk_size and part:
+                            parts.append(part)
+                            part = word
+                        else:
+                            part = candidate
+
+                    if part:
+                        parts.append(part)
+
+                    units_to_add = parts
+                else:
+                    units_to_add = [unit]
+
+                for piece in units_to_add:
+                    candidate = f"{current_chunk} {piece}".strip()
+
+                    if current_chunk and len(candidate) > chunk_size:
+                        chunks.append(current_chunk)
+                        current_chunk = piece
+                    else:
+                        current_chunk = candidate
+
         if current_chunk:
-            current_chunk += " " + sentence
-        else:
-            current_chunk = sentence
-
-    # Step 4: Save the final chunk
-    if current_chunk:
-        chunks.append(current_chunk.strip())
+            chunks.append(current_chunk)
 
     return chunks
 
 
-
-# 4. Extract text from uploaded PDFs
-def extract_pdf_chunks(uploaded_files):
+# 4. Extract PDF text and cache the resulting chunks
+@st.cache_data(show_spinner=False)
+def extract_pdf_chunks(file_items):
     records = []
 
-    for uploaded_file in uploaded_files:
-        pdf_bytes = uploaded_file.getvalue()
-
+    for filename, pdf_bytes in file_items:
         with pymupdf.open(
             stream=pdf_bytes,
             filetype="pdf"
         ) as pdf:
-
             for page_number, page in enumerate(pdf, start=1):
                 page_text = page.get_text("text")
 
                 for chunk in create_chunks(page_text):
                     records.append({
-                        "document": uploaded_file.name,
+                        "document": filename,
                         "page": page_number,
                         "text": chunk
                     })
@@ -96,7 +138,16 @@ def extract_pdf_chunks(uploaded_files):
     return records
 
 
-# 5. Let the employee upload documents
+# 5. Cache embeddings for document passages
+@st.cache_data(show_spinner=False)
+def embed_passages(passages):
+    return model.encode(
+        list(passages),
+        convert_to_numpy=True
+    )
+
+
+# 6. Let the employee upload documents
 uploaded_files = st.file_uploader(
     "Upload insurance policy or SOP PDFs",
     type=["pdf"],
@@ -104,7 +155,7 @@ uploaded_files = st.file_uploader(
 )
 
 
-# 6. Ask a question
+# 7. Ask a question
 with st.form("semantic_search_form"):
     query = st.text_input(
         "Enter your insurance operations question",
@@ -121,7 +172,7 @@ with st.form("semantic_search_form"):
     submitted = st.form_submit_button("Search documents")
 
 
-# 7. Retrieve and rank matching passages
+# 8. Retrieve and rank matching passages
 if submitted:
     if not uploaded_files:
         st.warning("Please upload at least one PDF.")
@@ -131,7 +182,15 @@ if submitted:
 
     else:
         with st.spinner("Extracting and searching documents..."):
-            records = extract_pdf_chunks(uploaded_files)
+
+            # Convert uploaded files into cacheable filename-and-bytes pairs.
+            file_items = tuple(
+                (uploaded_file.name, uploaded_file.getvalue())
+                for uploaded_file in uploaded_files
+            )
+
+            # Reuse extracted chunks when the uploaded files are unchanged.
+            records = extract_pdf_chunks(file_items)
 
             if not records:
                 st.warning(
@@ -140,25 +199,26 @@ if submitted:
                 )
 
             else:
-                passages = [
+                passages = tuple(
                     record["text"] for record in records
-                ]
-
-                document_embeddings = model.encode(
-                    passages,
-                    convert_to_numpy=True
                 )
 
+                # Reuse document embeddings for repeated searches.
+                document_embeddings = embed_passages(passages)
+
+                # Embed the new question each time.
                 query_embedding = model.encode(
-                    [query],
+                    [query.strip()],
                     convert_to_numpy=True
                 )
 
+                # Calculate semantic similarity.
                 scores = cosine_similarity(
                     query_embedding,
                     document_embeddings
                 )[0]
 
+                # Rank passages from highest to lowest score.
                 ranked_indices = scores.argsort()[::-1][:top_k]
 
                 st.success(
