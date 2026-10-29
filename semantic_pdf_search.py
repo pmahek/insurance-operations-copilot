@@ -551,6 +551,7 @@ def retrieve_passages(question, records, top_k=5):
 # 6. Evidence-grounded answer generation
 # --------------------------------------------------
 
+
 def generate_answer(question, retrieved_records):
     context_parts = []
 
@@ -596,8 +597,9 @@ RULES:
 6. If a duration or amount is referred to in the Policy Schedule but its value
    is not shown, state that the value was not retrieved.
 7. If a passage is incomplete, do not guess the missing wording.
-8. Cite each material factual claim using the source ID that supports it, e.g. [S1].
-   Use only IDs supplied above. A citation must support the specific claim beside it.
+8. Cite every material factual claim inline using the exact source IDs provided,
+   such as [S1]. Put each citation immediately after the claim it supports.
+   Never invent a source ID or omit citations because a fact seems obvious.
 9. Do not repeat the same condition in multiple sections.
 10. Do not include unrelated details merely because they appear in the evidence.
 11. Distinguish explicit policy wording from interpretation.
@@ -622,7 +624,8 @@ Do not add a separate Sources section; cite inline.
                 "role": "system",
                 "content": (
                     "You are a careful insurance document assistant. Accuracy and "
-                    "source-grounded answers matter more than completeness or confidence."
+                    "source-grounded answers matter more than completeness or confidence. "
+                    "Always cite material factual claims using the supplied source IDs."
                 ),
             },
             {
@@ -643,17 +646,82 @@ Do not add a separate Sources section; cite inline.
         for record in retrieved_records
     }
 
-    citation_groups = re.findall(
-        r"\[([^\]]+)\]",
-        answer,
-    )
+    def get_cited_ids(text):
+        """Extract source IDs written inside square brackets."""
+        citation_groups = re.findall(r"\[([^\]]+)\]", text)
 
-    cited_ids = {
-        source_id
-        for group in citation_groups
-        for source_id in re.findall(r"\bS\d+\b", group)
-    }
+        return {
+            source_id
+            for group in citation_groups
+            for source_id in re.findall(r"\bS\d+\b", group)
+        }
 
+    # Check whether the initial response has citations and uses valid IDs.
+    cited_ids = get_cited_ids(answer)
+    invalid_ids = cited_ids - valid_ids
+
+    # If citations are missing or invalid, ask the model to repair the answer.
+    # This is one retry only; it does not automatically invent citations.
+    if not cited_ids or invalid_ids:
+        repair_prompt = f"""
+Rewrite the answer below so it follows the citation requirements.
+
+USER QUESTION:
+{question}
+
+RETRIEVED EVIDENCE:
+{context}
+
+VALID SOURCE IDS:
+{", ".join(sorted(valid_ids))}
+
+PREVIOUS ANSWER:
+{answer}
+
+REQUIREMENTS:
+1. Preserve only claims supported by the retrieved evidence.
+2. Cite every material factual claim inline with a valid source ID.
+3. Place each citation immediately after the claim it supports.
+4. Use only the valid source IDs listed above. Never invent IDs.
+5. If the evidence does not establish an answer, say so explicitly.
+6. Do not invent missing policy limits, conditions, or exceptions.
+7. Keep the Answer, Conditions or details, and Limitations headings where useful.
+8. Return only the corrected answer, without discussing these instructions.
+"""
+
+        try:
+            repaired_response = ollama.chat(
+                model="qwen2.5:14b",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You revise insurance answers for evidence accuracy "
+                            "and inline citation compliance. Never invent citations."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": repair_prompt,
+                    },
+                ],
+                options={
+                    "temperature": 0.0,
+                    "num_ctx": 8192,
+                },
+            )
+
+            repaired_answer = repaired_response.message.content.strip()
+
+            if repaired_answer:
+                answer = repaired_answer
+
+        except Exception:
+            # Preserve the original answer if the retry fails.
+            pass
+
+    # Validate the final answer, including any repaired response.
+    cited_ids = get_cited_ids(answer)
     invalid_ids = cited_ids - valid_ids
 
     if invalid_ids:
@@ -670,6 +738,7 @@ Do not add a separate Sources section; cite inline.
         )
 
     return answer
+
 
 
 # --------------------------------------------------
