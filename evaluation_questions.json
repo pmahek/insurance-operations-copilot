@@ -1,0 +1,42 @@
+[
+  {
+    "question": "What medical expenses are covered under inpatient hospitalization?",
+    "expected_sections": ["1"]
+  },
+  {
+    "question": "What are the conditions for availing shared accommodation cash benefit?",
+    "expected_sections": ["2"]
+  },
+  {
+    "question": "How does the Health Multiplier benefit work?",
+    "expected_sections": ["3"]
+  },
+  {
+    "question": "Are medical expenses incurred before hospitalization covered?",
+    "expected_sections": ["4"]
+  },
+  {
+    "question": "What medical expenses are covered after hospital discharge?",
+    "expected_sections": ["5"]
+  },
+  {
+    "question": "What treatments qualify as day care treatment?",
+    "expected_sections": ["6"]
+  },
+  {
+    "question": "When can emergency road ambulance expenses be claimed?",
+    "expected_sections": ["9"]
+  },
+  {
+    "question": "How does the ReInsure benefit work?",
+    "expected_sections": ["12"]
+  },
+  {
+    "question": "What is covered under annual health check-up?",
+    "expected_sections": ["19"]
+  },
+  {
+    "question": "How does the enhanced cumulative bonus work?",
+    "expected_sections": ["22"]
+  }
+]

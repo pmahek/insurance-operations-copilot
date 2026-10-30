@@ -96,7 +96,6 @@ def create_chunks(text, chunk_size=850, overlap=120):
     for sentence in split_into_sentences(text):
         units = [sentence]
 
-        # Split unusually long sentences into smaller word-based pieces.
         if len(sentence) > chunk_size:
             units = []
             piece = ""
@@ -131,7 +130,6 @@ def create_chunks(text, chunk_size=850, overlap=120):
     if current:
         chunks.append(current)
 
-    # Remove exact normalized duplicates.
     unique = []
     seen = set()
 
@@ -166,7 +164,6 @@ def split_page_sections(
 
         return segments, current_section_code, current_section_title
 
-    # Preserve text before the first recognized heading.
     if matches[0].start() > 0:
         prefix = page_text[:matches[0].start()]
 
@@ -304,9 +301,15 @@ def normalized_phrase(text):
 
 
 def section_targets_for_query(question, records):
-    """Find policy sections explicitly named in the question."""
+    """
+    Identify relevant policy sections using:
+    1. Explicit section numbers.
+    2. Exact section titles.
+    3. Common alternative benefit names.
+    """
     targets = set()
 
+    # Detect explicitly mentioned section numbers, such as C.3 or C 12.
     for match in re.finditer(
         r"\bC\s*\.?\s*(\d{1,2})\b",
         question,
@@ -315,6 +318,8 @@ def section_targets_for_query(question, records):
         targets.add(match.group(1))
 
     query_norm = normalized_phrase(question)
+
+    # Build a mapping of available section codes and titles.
     titles = {}
 
     for record in records:
@@ -324,27 +329,52 @@ def section_targets_for_query(question, records):
         if code and title:
             titles[str(code)] = title
 
+    # Match exact section titles.
     for code, title in titles.items():
         title_norm = normalized_phrase(title)
 
         if len(title_norm) >= 5 and title_norm in query_norm:
             targets.add(code)
 
+    # Map common wording and synonyms to their policy sections.
     aliases = {
+        # C.1 — In-patient Hospitalization Treatment
         "inpatient hospitalization treatment": {"1"},
-        "day care treatment": {"6"},
+        "in patient hospitalization treatment": {"1"},
+
+        # C.3 — Health Multiplier
+        "health multiplier": {"3"},
+        "health multiplier benefit": {"3"},
+        "multiplier benefit": {"3"},
+
+        # C.4 — Pre-Hospitalization Medical Expenses
         "pre hospitalization": {"4"},
+        "pre hospitalization medical expenses": {"4"},
+        "before hospitalization": {"4"},
+        "prior to hospitalization": {"4"},
+
+        # C.5 — Post-Hospitalization Medical Expenses
         "post hospitalization": {"5"},
+        "post hospitalization medical expenses": {"5"},
+        "after hospitalization": {"5"},
+        "after hospital discharge": {"5"},
+        "after discharge from hospital": {"5"},
+        "post discharge": {"5"},
+        "expenses after discharge": {"5"},
+
+        # C.6 — Day Care Treatment
+        "day care treatment": {"6"},
     }
 
     for phrase, codes in aliases.items():
         if phrase in query_norm:
             targets.update(codes)
 
+    # Keep only section codes that actually exist in the extracted records.
     available = {
         str(record.get("section_code"))
         for record in records
-        if record.get("section_code")
+        if record.get("section_code") is not None
     }
 
     return targets & available
@@ -447,8 +477,6 @@ def retrieve_passages(question, records, top_k=5):
         )[0]
 
     except ValueError:
-        # Handles empty vocabularies, such as documents containing
-        # only stop words or text that TF-IDF cannot tokenize.
         keyword_scores = [0.0] * len(records)
 
     def normalize(scores):
@@ -470,7 +498,8 @@ def retrieve_passages(question, records, top_k=5):
 
     query_norm = normalized_phrase(question)
 
-    # Restrict results to explicitly requested sections when possible.
+    # If the question identifies a section, search within that section.
+    # Otherwise, search across the complete document.
     candidate_indices = list(range(len(records)))
 
     if target_codes:
@@ -496,6 +525,7 @@ def retrieve_passages(question, records, top_k=5):
 
         if target_codes and str(code) in target_codes:
             bonus = 0.42
+
         elif title and len(title) >= 5 and title in query_norm:
             bonus = 0.24
 
@@ -550,7 +580,6 @@ def retrieve_passages(question, records, top_k=5):
 # --------------------------------------------------
 # 6. Evidence-grounded answer generation
 # --------------------------------------------------
-
 
 def generate_answer(question, retrieved_records):
     context_parts = []
@@ -656,12 +685,10 @@ Do not add a separate Sources section; cite inline.
             for source_id in re.findall(r"\bS\d+\b", group)
         }
 
-    # Check whether the initial response has citations and uses valid IDs.
     cited_ids = get_cited_ids(answer)
     invalid_ids = cited_ids - valid_ids
 
-    # If citations are missing or invalid, ask the model to repair the answer.
-    # This is one retry only; it does not automatically invent citations.
+    # One retry if citations are missing or invalid.
     if not cited_ids or invalid_ids:
         repair_prompt = f"""
 Rewrite the answer below so it follows the citation requirements.
@@ -717,10 +744,9 @@ REQUIREMENTS:
                 answer = repaired_answer
 
         except Exception:
-            # Preserve the original answer if the retry fails.
             pass
 
-    # Validate the final answer, including any repaired response.
+    # Validate the final answer.
     cited_ids = get_cited_ids(answer)
     invalid_ids = cited_ids - valid_ids
 
@@ -738,7 +764,6 @@ REQUIREMENTS:
         )
 
     return answer
-
 
 
 # --------------------------------------------------
